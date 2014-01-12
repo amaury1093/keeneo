@@ -1,0 +1,202 @@
+#include "PrecHeaders.h"
+#include "CImgProvider.h"
+
+using namespace std;
+
+// Une variable globale à toute l'algorithme : l'image sur laquelle on travaille (afficher des points etc.)
+cv::Mat out;
+
+// Fonction permettant de classer les points clés par ordre de pertinence (donnée par l'attribut response)W
+void KPSwap(std::vector<cv::KeyPoint,std::allocator<cv::KeyPoint>> pointscles)
+{
+	int unsigned j,k,pointmax = 0;
+	
+	std::vector<cv::KeyPoint,std::allocator<cv::KeyPoint>> kSwap(1,pointscles[0]);
+	
+	for (j=0;j<pointscles.size();j++)
+	{
+		for (k=0;k<pointscles.size()-j;k++)
+		{
+			if(pointscles[pointmax].response < pointscles[pointmax].response)
+				pointmax = k;
+		}
+
+		kSwap[0] = pointscles[pointmax];
+		pointscles[pointmax] = pointscles[j];
+		pointscles[j] = kSwap[0];
+	}
+}
+
+// Détection des points clés d'une image et affichage éventuel de ces points
+vector<cv::KeyPoint, allocator<cv::KeyPoint>> detectSIFT(cv::Mat img, bool showPoints)
+{
+	// Paramètres
+	double seuil = 0.25, seuilContour = 0.25;
+	int nbPoints = 150;
+	int	x1 = 1,
+		x2 = 500,
+		y1 = 100, 
+		y2 = 479;
+
+	// Variables
+	cv::Mat mask = cv::Mat::ones(480,640, CV_8UC1);
+	cv::SiftFeatureDetector detector(seuil, seuilContour,4,3,0,0);
+	vector<cv::KeyPoint, allocator<cv::KeyPoint>> keyPoints;
+
+	//mask.at<double>(100,100) = 0;
+	for (int i = x1; i < x2; i++)
+	{
+		for(int j = y1; j < y2; j++)
+		{
+			mask.at<bool>(j, i) = 0;
+		}
+	}
+
+	detector.detect(img, keyPoints, mask);
+
+	KPSwap(keyPoints); // Pour classer les points par ordre de "force"
+	keyPoints.resize(nbPoints); // Et on garde nbPoints points
+
+	if (showPoints)
+		drawKeypoints(img, keyPoints, out, CV_RGB(255,0,0));
+
+	return keyPoints;
+}
+
+/*#################### Algorithme ####################*/
+
+int _tmain(int argc, _TCHAR* argv[])
+{  
+
+/*#################### Les variables ####################*/
+  
+	// Les images sur lesquelles on travaille
+	cv::Mat currImg, prevImg, stabImg, matchImg;
+	int imgNb = 0; // Le numéro de l'image courante
+
+	// Paramètres
+	double max_dist = 0; double min_dist = 100;
+	cv::Scalar sym;
+
+	// Les points clés trouvés à l'étape 1
+    vector<cv::KeyPoint, allocator<cv::KeyPoint>> prevKeyPoints, currKeyPoints;
+
+	// Les descripteurs et leur appariement
+	cv::SurfDescriptorExtractor extractor;
+	cv::Mat prevDescriptor, currDescriptor;
+	vector<cv::Point2f> prevPoints, currPoints; // Seuls les coordonnées des points clés, sans information supplémentaire.
+	cv::FlannBasedMatcher matcher; // Notre algorithme d'appariement est celui de FLANN
+    vector< cv::DMatch > matches;
+
+	// La matrice de transformation entre deux images et son inverse, Transfo est le produit des invH de toutes les images
+	cv::Mat H, invH, Transfo = cv::Mat::eye(3, 3, CV_64F);
+	
+/*#################### Gestion des entrées sorties vidéos ####################*/
+
+	// La vidéo en entrée
+    const string input = "../data/image_.avi";
+    CImgProvider provider(input);
+	cv::VideoCapture videoinput(input); // Image provider helps you extract images from video file
+
+	// Les vidéos en sortie
+	cv::VideoWriter writer("../data/output.avi",CV_FOURCC('x','v','i','d'),videoinput.get(CV_CAP_PROP_FPS),cvSize(provider.getW(),provider.getH()));
+	cv::VideoWriter match("../data/match.avi",CV_FOURCC('x','v','i','d'),videoinput.get(CV_CAP_PROP_FPS),cvSize(2*provider.getW(),provider.getH()));
+
+	//cout << provider.getCodec() << endl;    // Just for fun check codec version
+	
+/*#################### Parcours de la vidéo image par image ####################*/
+
+    while (provider.getNext(currImg))        // GetNext returns false if no more images can be retrieved from video file
+    {
+
+        currImg.copyTo(out);  // images obtained with GetNext are temporary so they must be copied to an image which can then be processed, saved...
+		currImg.copyTo(matchImg);
+		//img.copyTo(stabImg);
+       
+        sym = mean(out)/255.;
+
+/*#################### Etape 1 : Détection des points clés ####################*/
+		
+		currKeyPoints = detectSIFT(currImg, false);
+
+		// Si ce n'est pas la première image, alors on peut la traiter et faire une stabilisation par rapport à l'image précédente
+        if (imgNb >= 1)
+        {	
+
+/*#################### Etape 2 : Extraction des descripteurs ####################*/
+		
+            extractor.compute(prevImg, prevKeyPoints, prevDescriptor );
+            extractor.compute(currImg, currKeyPoints, currDescriptor );
+
+
+/*#################### Etape 3 : Appariement ####################*/
+            
+            matcher.match( prevDescriptor, currDescriptor, matches );
+
+            //-- Quick calculation of max and min distances between keypoints
+            for( int i = 0; i < prevDescriptor.rows; i++ )
+            { double dist = matches[i].distance;
+                if( dist < min_dist ) min_dist = dist;
+                if( dist > max_dist ) max_dist = dist;
+            }
+
+            //-- Draw only "good" matches (i.e. whose distance is less than 3*min_dist )
+			vector< cv::DMatch >* good_matches=new vector< cv::DMatch >();
+
+            for(int i = 0; i < prevDescriptor.rows; i++ )
+            {
+                if( matches[i].distance < 3.0 * min_dist )
+					good_matches->push_back( matches[i]);
+            }
+			
+      
+            cout <<matches.size() << endl;  // Nombre de paires trouvées (un peu faible par moment...)
+
+            cv::drawMatches( prevImg, prevKeyPoints, out, currKeyPoints,
+                        matches, matchImg, cv::Scalar::all(-1), cv::Scalar::all(-1),
+                        vector<char>(), cv::DrawMatchesFlags::NOT_DRAW_SINGLE_POINTS );
+
+            //-- Localize the object
+
+            for(int i = 0; i < matches.size(); i++ )
+            {
+                //-- Get the keypoints from the good matches
+                prevPoints.push_back( prevKeyPoints[ (matches)[i].queryIdx ].pt );
+                currPoints.push_back( currKeyPoints[ (matches)[i].trainIdx ].pt );
+            }
+
+/*#################### Etape 4 : Trouver la transformation affine ####################*/
+
+			H = findHomography(prevPoints, currPoints, CV_RANSAC );      // obtention de la transformation
+			
+/*#################### Etape 5 : Appliquer la transformation pour stabiliser ####################*/
+
+			cv::invert(H, invH);
+			Transfo = Transfo * invH; // Transformation totale depuis le début de la vidéo : voir à remplacer par une transformation image par image
+	
+			warpPerspective(out, stabImg, Transfo,cvSize(640,480));   // On applique la transformation trouvée
+
+        }
+	
+		else	// i.e. 1er tour de boucle
+		{
+			out.copyTo(stabImg); // Si c'est la 1ere image, l'image stabilisée est evidemment l'image de départ
+		}
+
+        prevKeyPoints = currKeyPoints;
+        out.copyTo(prevImg);
+		imgNb++;
+	
+/*#################### Affichage ####################*/
+ 
+        // Now we can show result in a separate window
+        imshow("difference",matchImg);    // simple display call
+        cv::waitKey(10);              // Wait for key press for n ms (0 means forever)
+
+        // And save it to video file
+        writer << out;
+		match << matchImg;
+    }
+
+    return 0;
+	}
